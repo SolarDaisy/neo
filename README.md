@@ -13,7 +13,7 @@ Get the latest installer from the **[Releases page](../../releases)**:
 - **macOS** — download the `.dmg` for older Intel machines or the arm64 file for Mac silicon. Open it and drag NEO to Applications.
 - **Windows** — get `NEO-Setup` (the installer, which keeps itself up to date) and run it, or the `portable` `.exe`, which runs without installing.
 
-  Your library lives in `Documents\NEO Library`. If OneDrive backs up your Documents folder, that puts your books in OneDrive too; File → Library Folder… moves the library anywhere you like. If Windows Security's *Controlled folder access* is on, Windows won't let NEO save in Documents: NEO says so when it starts, and you can allow NEO there or pick another folder.
+  Your library lives in `Documents\NEO Library`. If OneDrive backs up your Documents folder, that puts your books in OneDrive too. Changing the library folder doesn't move books for you. If Windows Security's *Controlled folder access* is on, Windows won't let NEO save in Documents: NEO says so when it starts, and you can allow NEO there or pick another folder.
 - **Linux** — download the `.AppImage`, make it executable, and run it:
 
   ```
@@ -81,7 +81,7 @@ Bring in existing .docx, .txt, and .md manuscripts; chapters and scene breaks ar
 
 **Backups** 
 
-Continuous autosave, daily zip backups kept for two weeks, everything stored as plain files. Set up your NEO library folder on your iCloud if you want for extra safety. You can also email copies of your WIP to yourself with a keystroke: ⌘E.
+Continuous autosave, daily zip backups kept for two weeks, everything stored as plain files. **Google Drive sync** (File → Google Drive…) sends the latest library to a private `NEO Library` folder in Drive after saves and checks for changes from other desktop computers every 30 seconds. It keeps the three newest daily zip backups in Drive. Deletion sync is off by default; File → Google Drive… lets you enable it for every computer connected to that Drive library. If two computers change the same file before syncing, NEO keeps the incoming copy under `Backups/Google Drive Conflicts` on this computer and in `Google Drive Conflicts` in Drive rather than silently discarding either version. Drive credentials are stored encrypted in NEO's app settings, not in the library. This built-in sync is for desktop NEO; Pocket keeps using its existing local-folder and sync-provider options. Sync is available in builds whose publisher has configured a Google OAuth client ID; see the Google Drive setup note in the repository's contributor documentation before making a release. You can also email copies of your WIP to yourself with a keystroke: ⌘E.
 
 ## Your files
 

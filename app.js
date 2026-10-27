@@ -17889,6 +17889,13 @@ window.neo.onMenu(async (msg) => {
   // full screen and focus mode together hide the bottom bar until hovered
   // (styles.css); the window says when it goes in and out, whatever is open
   if (msg.type === 'fullScreen') { document.body.classList.toggle('full-screen', !!msg.value); return; }
+  if (msg.type === 'googleDriveSync') {
+    if (msg.disconnected) toast(t('Google Drive disconnected'));
+    else if (msg.deletePropagation !== undefined) toast(t(msg.deletePropagation ? 'Google Drive deletion sync is on' : 'Google Drive deletion sync is off'));
+    else if (msg.ok) toast(t('Google Drive sync finished'));
+    else toast(t('Google Drive sync failed: {error}', { error: msg.error || t('unknown error') }), 8000);
+    return;
+  }
   if ($('#keyboard-shortcuts') && msg.type !== 'help') return;
   // a window the menu opens (⌘, for Goals, say) never stacks on one that's
   // already open: pressing it again used to pile up overlays
