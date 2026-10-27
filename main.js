@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, utilityProcess, scr
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { URL } = require('node:url');
 const { Buffer } = require('buffer');
 const { GoogleDriveSync } = require('./google-drive.js');
 
@@ -264,6 +265,95 @@ function backupToDriveNow() {
   });
 }
 
+function escapeDriveFolderHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
+function promptGoogleDriveFolderName(initial) {
+  const parent = BrowserWindow.getFocusedWindow();
+  const options = {
+    width: 420,
+    height: 230,
+    resizable: false,
+    show: false,
+    autoHideMenuBar: true,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
+  };
+  if (parent) { options.parent = parent; options.modal = true; }
+  const win = new BrowserWindow(options);
+  win.setMenu(null);
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeDriveFolderHtml(t('Google Drive folder'))}</title><style>
+    body{font:14px system-ui,sans-serif;margin:24px;color:#242424}label{display:block;margin:0 0 8px}input{box-sizing:border-box;width:100%;padding:9px;font:inherit}footer{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}button{padding:7px 14px;font:inherit}
+  </style></head><body><form id="folder-form"><label for="folder-name">${escapeDriveFolderHtml(t('Folder name'))}</label>
+    <input id="folder-name" maxlength="255" required autofocus value="${escapeDriveFolderHtml(initial)}">
+    <footer><button type="button" id="cancel">${escapeDriveFolderHtml(t('Cancel'))}</button><button type="submit">${escapeDriveFolderHtml(t('Use folder'))}</button></footer>
+    </form><script>
+      document.getElementById('cancel').addEventListener('click', () => window.close());
+      document.getElementById('folder-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        window.location.hash = 'folder=' + encodeURIComponent(document.getElementById('folder-name').value.trim());
+      });
+    </script></body></html>`;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (!win.isDestroyed()) win.close();
+      resolve(value);
+    };
+    win.once('closed', () => finish(null));
+    win.webContents.on('did-navigate-in-page', (_event, url) => {
+      const hash = new URL(url).hash;
+      if (hash.startsWith('#folder=')) finish(decodeURIComponent(hash.slice(8)));
+    });
+    win.once('ready-to-show', () => win.show());
+    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html)).catch((err) => {
+      if (!win.isDestroyed()) win.close();
+      if (!settled) { settled = true; reject(err); }
+    });
+  });
+}
+
+async function chooseGoogleDriveFolder() {
+  const current = googleDriveSync.folderName();
+  const { response } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+    type: 'question',
+    message: t('Google Drive folder'),
+    detail: t('Choose the top-level Drive folder NEO will create and use for sync and backups.'),
+    buttons: [t('Neo Library'), t('Custom folder…'), t('Cancel')],
+    defaultId: 0,
+    cancelId: 2
+  });
+  if (response < 0 || response === 2) return null;
+  let name = response === 0 ? 'Neo Library' : await promptGoogleDriveFolderName(current === 'Neo Library' ? '' : current);
+  if (name === null) return null;
+  try { name = googleDriveSync.normalizeFolderName(name); } catch {
+    await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'warning',
+      message: t('Google Drive folder'),
+      detail: t('The Google Drive folder name must be 1–255 characters and cannot contain slashes or reserved characters.')
+    });
+    return null;
+  }
+  const changed = name !== current;
+  if (changed && googleDriveSync.connected()) {
+    const { response: confirm } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'warning',
+      message: t('Change Google Drive folder?'),
+      detail: t('NEO will leave the current Drive folder untouched and start syncing this library to “{name}”.', { name }),
+      buttons: [t('Change folder'), t('Cancel')],
+      defaultId: 1,
+      cancelId: 1
+    });
+    if (confirm !== 0) return null;
+  }
+  if (changed) await googleDriveSync.setFolderName(name);
+  return { name, changed };
+}
+
 async function manageGoogleDrive() {
   if (!googleDriveSync) throw new Error('Google Drive is not ready yet.');
   if (!googleDriveSync.configured()) {
@@ -301,6 +391,10 @@ async function manageGoogleDrive() {
     cancelId: connected ? 5 : 1
   });
   if (response < 0 || response === (connected ? 2 : 1)) return;
+  if (!connected) {
+    const folderChoice = await chooseGoogleDriveFolder();
+    if (!folderChoice) return;
+  }
   let action = response;
   if (connected && response === 1) {
     const { response: moreChoice } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
@@ -319,7 +413,7 @@ async function manageGoogleDrive() {
         type: 'question',
         message: t('Google Drive'),
         detail: t(deletePropagation ? 'Deletion sync is on.' : 'Deletion sync is off.'),
-        buttons: [t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Sign out'), t('Back')],
+        buttons: [t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Drive folder…'), t('More…')],
         defaultId: 2,
         cancelId: 2
       });
@@ -333,8 +427,31 @@ async function manageGoogleDrive() {
           sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
         }
       } else if (settingsChoice === 1) {
-        await googleDriveSync.disconnect();
-        sendToWindow({ type: 'googleDriveSync', ok: true, disconnected: true });
+        const folderChoice = await chooseGoogleDriveFolder();
+        if (folderChoice && folderChoice.changed) {
+          try {
+            await googleDriveSync.sync();
+            googleDriveSync.startMonitoring();
+            await uploadRecentDriveBackups();
+            sendToWindow({ type: 'googleDriveSync', ok: true, folderChanged: folderChoice.name });
+          } catch (err) {
+            logError('Google Drive folder change', err);
+            sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+          }
+        }
+      } else {
+        const { response: accountChoice } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+          type: 'question',
+          message: t('Google Drive'),
+          detail: t('Sign out of Google Drive on this computer? Your local library and Drive files will stay in place.'),
+          buttons: [t('Sign out'), t('Back')],
+          defaultId: 1,
+          cancelId: 1
+        });
+        if (accountChoice === 0) {
+          await googleDriveSync.disconnect();
+          sendToWindow({ type: 'googleDriveSync', ok: true, disconnected: true });
+        }
       }
       return;
     }

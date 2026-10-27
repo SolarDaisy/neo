@@ -10,6 +10,7 @@ const { URL } = require('node:url');
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const FOLDER = 'application/vnd.google-apps.folder';
+const DEFAULT_FOLDER = 'Neo Library';
 const CLIENT_ID = process.env.NEO_GOOGLE_DRIVE_CLIENT_ID || '862925797610-7cvf69rciietluq8urhfrilmehr07m5f.apps.googleusercontent.com';
 const CLIENT_SECRET = process.env.NEO_GOOGLE_DRIVE_CLIENT_SECRET || '';
 const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
@@ -94,6 +95,7 @@ class GoogleDriveSync {
     this.accessToken = null;
     this.expiresAt = 0;
     this.rootId = null;
+    this.rootPromise = null;
     this.running = null;
     this.fullRequested = false;
     this.pendingPaths = new Set();
@@ -128,6 +130,37 @@ class GoogleDriveSync {
 
   connected() {
     return !!this.readSettings().googleDriveToken;
+  }
+
+  folderName() {
+    const sync = this.readSettings().googleDriveSync || {};
+    return typeof sync.folderName === 'string' && sync.folderName ? sync.folderName : DEFAULT_FOLDER;
+  }
+
+  normalizeFolderName(name) {
+    if (typeof name !== 'string') throw new Error('Enter a name for the Google Drive folder.');
+    const value = name.trim();
+    if (!value || value.length > 255 || /[\\/:*?"<>|\0]/.test(value)) {
+      throw new Error('The Google Drive folder name must be 1–255 characters and cannot contain slashes or reserved characters.');
+    }
+    return value;
+  }
+
+  async setFolderName(name) {
+    const folderName = this.normalizeFolderName(name);
+    if (folderName === this.folderName()) return false;
+    while (this.running) await this.running;
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = null;
+    this.pendingPaths.clear();
+    this.fullRequested = false;
+    this.rootId = null;
+    this.rootPromise = null;
+    const settings = this.readSettings();
+    const sync = settings.googleDriveSync || {};
+    settings.googleDriveSync = { ...sync, folderName, rootId: null, files: {}, folders: {} };
+    this.writeSettings(settings);
+    return true;
   }
 
   async authorize() {
@@ -221,8 +254,10 @@ class GoogleDriveSync {
     let tokens = null;
     try { tokens = this.tokens(); } catch { /* settings are cleared even if credentials cannot be opened */ }
     const settings = this.readSettings();
+    const folderName = settings.googleDriveSync && settings.googleDriveSync.folderName;
     delete settings.googleDriveToken;
     delete settings.googleDriveSync;
+    if (folderName) settings.googleDriveSync = { folderName };
     this.writeSettings(settings);
     this.accessToken = null;
     this.expiresAt = 0;
@@ -347,22 +382,56 @@ class GoogleDriveSync {
 
   async ensureRoot() {
     if (this.rootId) return this.rootId;
+    if (this.rootPromise) return this.rootPromise;
+    this.rootPromise = this.findOrCreateRoot().finally(() => { this.rootPromise = null; });
+    return this.rootPromise;
+  }
+
+  async findOrCreateRoot() {
     const settings = this.readSettings();
     if (settings.googleDriveSync && settings.googleDriveSync.rootId) {
       this.rootId = settings.googleDriveSync.rootId;
+      if (!settings.googleDriveSync.folderName && this.folderName() === DEFAULT_FOLDER) {
+        const existing = await this.request(`${DRIVE_API}/files/${encodeURIComponent(this.rootId)}?fields=id,name`);
+        if (existing.name === 'NEO Library') {
+          await this.request(`${DRIVE_API}/files/${encodeURIComponent(this.rootId)}?fields=id,name`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: DEFAULT_FOLDER })
+          });
+        }
+        settings.googleDriveSync = { ...settings.googleDriveSync, folderName: DEFAULT_FOLDER };
+        this.writeSettings(settings);
+      }
       return this.rootId;
     }
-    const query = new URLSearchParams({
-      q: "mimeType='application/vnd.google-apps.folder' and appProperties has { key='neoRoot' and value='1' } and trashed=false",
-      spaces: 'drive',
-      pageSize: '10',
-      fields: 'files(id,name)'
-    });
-    const found = await this.request(`${DRIVE_API}/files?${query}`);
+    const folderName = this.folderName();
+    const findFolder = async (name) => {
+      const escapedName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const query = new URLSearchParams({
+        q: `mimeType='${FOLDER}' and name='${escapedName}' and 'root' in parents and appProperties has { key='neoRoot' and value='1' } and trashed=false`,
+        spaces: 'drive',
+        pageSize: '10',
+        fields: 'files(id,name)'
+      });
+      return this.request(`${DRIVE_API}/files?${query}`);
+    };
+    const found = await findFolder(folderName);
     let root = (found.files || [])[0];
-    if (!root) root = await this.createFolder('NEO Library', 'root', { neoRoot: '1' });
+    if (!root && folderName === DEFAULT_FOLDER) {
+      const legacy = await findFolder('NEO Library');
+      root = (legacy.files || [])[0];
+      if (root) {
+        await this.request(`${DRIVE_API}/files/${encodeURIComponent(root.id)}?fields=id,name`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: folderName })
+        });
+      }
+    }
+    if (!root) root = await this.createFolder(folderName, 'root', { neoRoot: '1' });
     this.rootId = root.id;
-    settings.googleDriveSync = { ...(settings.googleDriveSync || {}), rootId: root.id };
+    settings.googleDriveSync = { ...(settings.googleDriveSync || {}), folderName, rootId: root.id };
     this.writeSettings(settings);
     return this.rootId;
   }
