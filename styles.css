@@ -1441,6 +1441,15 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   cursor: pointer; padding: 0 2px; line-height: 1;
 }
 #zoom-control button:hover, #zoom-control:hover { color: #ddd; }
+#body-font-control {
+  max-width: 150px; height: 24px; padding: 2px 5px;
+  background: transparent; border: 1px solid transparent; border-radius: 4px;
+  color: inherit; font: inherit; cursor: pointer;
+}
+#body-font-control:hover, #body-font-control:focus-visible {
+  background: var(--bg); border-color: #3a3a3a; color: #eee; outline: none;
+}
+#body-font-control option { background: #191919; color: #eee; }
 
 /* --- Find & replace bar --- */
 #searchbar {
@@ -1713,6 +1722,7 @@ body.bright .pop-menu button:disabled { color: #8a8a8a; }
 }
 @container (max-width: 700px) {
   .ui-zoomed #zoom-control { display: none; }
+  .ui-zoomed #body-font-control { display: none; }
   .ui-zoomed #back-to-shelf span[data-i18n] { display: none; }
 }
 
@@ -1844,6 +1854,10 @@ body.light .stickies-empty { color: #8f8a80; }
 body.light #bottombar { border-top-color: #dcd8d0; }
 body.light .tab:not(.active):hover, body.light #counters span:hover,
 body.light #zoom-control:hover, body.light #zoom-control button:hover { color: #1c1a17; }
+body.light #body-font-control:hover, body.light #body-font-control:focus-visible {
+  border-color: #cfcac0; color: #1c1a17;
+}
+body.light #body-font-control option { background: #fff; color: #1c1a17; }
 body.light .tab.active { background: #e4e0d8; }
 body.light #searchbar { background: #fff; border-color: #d9d4ca; box-shadow: 0 6px 24px rgba(0,0,0,0.12); }
 body.light #searchbar input { background: #faf9f6; border-color: #cfcac0; color: #1c1a17; }
