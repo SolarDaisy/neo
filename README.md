@@ -9,7 +9,7 @@ NEO understands from the moment you install it that you are writing *books* and 
 
 NEO runs locally. WIPs are saved in plain files on your disk. No accounts or subscriptions. And it's free!
 
-This fork adds cloud backup and syncing with Google Drive, and allows custom fonts within a manuscript. (kinda broken at the moment lol)
+This fork adds cloud backup and syncing with Google Drive (kinda broken at the moment lol), and allows custom fonts within a manuscript. 
 
 ## Cloud support
 To enable Google Drive support, you will need an OAuth client ID. you can go **[HERE](https://support.google.com/cloud/answer/15544987?hl=en&ref_topic=15540269&sjid=11036149471100218666-NC)** to find out how.
