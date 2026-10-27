@@ -1,6 +1,7 @@
-# NEO
 ## This is a fork
 **[Click here](https://github.com/hughhowey/neo)** to go to the original
+
+# NEO
 
 **A distraction-free word processor for authors, by a wannabe author.**
 
