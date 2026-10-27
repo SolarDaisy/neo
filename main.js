@@ -319,7 +319,7 @@ async function manageGoogleDrive() {
         type: 'question',
         message: t('Google Drive'),
         detail: t(deletePropagation ? 'Deletion sync is on.' : 'Deletion sync is off.'),
-        buttons: [t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Disconnect'), t('Back')],
+        buttons: [t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Sign out'), t('Back')],
         defaultId: 2,
         cancelId: 2
       });
