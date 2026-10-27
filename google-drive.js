@@ -10,13 +10,50 @@ const { URL } = require('node:url');
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const FOLDER = 'application/vnd.google-apps.folder';
-const CLIENT_ID = process.env.NEO_GOOGLE_DRIVE_CLIENT_ID || 'ADD_GOOGLE_OAUTH_CLIENT_ID_BEFORE_RELEASE';
+const CLIENT_ID = process.env.NEO_GOOGLE_DRIVE_CLIENT_ID || '862925797610-7cvf69rciietluq8urhfrilmehr07m5f.apps.googleusercontent.com';
 const CLIENT_SECRET = process.env.NEO_GOOGLE_DRIVE_CLIENT_SECRET || '';
 const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
 const hash = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const stampOf = (stat) => `${stat.mtimeMs}:${stat.size}`;
 const safeName = (name) => String(name).replace(/[\\/:*?"<>|]/g, '_');
+function mergeLibraryFiles(localData, remoteData) {
+  try {
+    const local = JSON.parse(localData.toString('utf8'));
+    const remote = JSON.parse(remoteData.toString('utf8'));
+    if (!Array.isArray(local.shelves) || !Array.isArray(remote.shelves)) return null;
+    const merged = { ...remote, ...local };
+    if (!local.authorName && remote.authorName) merged.authorName = remote.authorName;
+    if (remote.firstRunDone) merged.firstRunDone = true;
+    for (const key of ['penNames', 'customWords']) {
+      if (Array.isArray(local[key]) && Array.isArray(remote[key])) {
+        merged[key] = [...new Set([...local[key], ...remote[key]])];
+      }
+    }
+    const shelves = [];
+    const byId = new Map();
+    const bookIds = new Set();
+    for (const shelf of [...local.shelves, ...remote.shelves]) {
+      if (!shelf || typeof shelf.id !== 'string' || !shelf.id || !Array.isArray(shelf.bookIds)) return null;
+      let target = byId.get(shelf.id);
+      if (!target) {
+        target = { ...shelf, bookIds: [] };
+        byId.set(shelf.id, target);
+        shelves.push(target);
+      }
+      for (const id of shelf.bookIds) {
+        if (typeof id === 'string' && !bookIds.has(id)) {
+          target.bookIds.push(id);
+          bookIds.add(id);
+        }
+      }
+    }
+    merged.shelves = shelves;
+    return Buffer.from(JSON.stringify(merged, null, 2));
+  } catch {
+    return null;
+  }
+}
 const safeRelative = (rel) => typeof rel === 'string' && rel.split('/').every((part) =>
   part && part !== '.' && part !== '..' && !/[\\/\0]/.test(part));
 const timedFetch = (url, options, timeoutMs = 30000) => fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
@@ -524,6 +561,75 @@ class GoogleDriveSync {
     return this.running;
   }
 
+  async importFromDrive() {
+    if (this.running) return this.running.then(() => this.importFromDrive());
+    this.running = this.importOnce().finally(() => {
+      this.running = null;
+      if (this.fullRequested) { this.fullRequested = false; this.sync().catch((err) => this.logError('Google Drive sync', err)); }
+      else if (this.pendingPaths.size) this.queue();
+    });
+    return this.running;
+  }
+
+  async importOnce() {
+    const rootId = await this.ensureRoot();
+    const remoteState = await this.remoteFiles(rootId);
+    const local = await this.localFiles();
+    const settings = this.readSettings();
+    const syncState = settings.googleDriveSync || {};
+    const baseline = syncState.files || {};
+    const next = { ...baseline };
+
+    for (const [rel, remote] of remoteState.files) {
+      if (!remote.hash) remote.hash = hash(await this.bytes(remote));
+      const here = local.get(rel);
+      if (!here) {
+        const saved = await this.download(rel, remote);
+        next[rel] = { ...saved, remoteId: remote.id };
+        local.set(rel, { full: path.join(this.libraryDir, ...rel.split('/')), stamp: saved.stamp });
+        continue;
+      }
+
+      const localData = await fsp.readFile(here.full);
+      const localHash = hash(localData);
+      if (localHash === remote.hash) {
+        next[rel] = { hash: localHash, stamp: here.stamp, remoteId: remote.id };
+        continue;
+      }
+
+      if (rel === 'library.json') {
+        const merged = mergeLibraryFiles(localData, await this.bytes(remote));
+        if (merged) {
+          await writeDurable(here.full, merged);
+          const uploaded = await this.upload(rel, { full: here.full }, remote, remoteState.folders, rootId);
+          next[rel] = { hash: uploaded.hash, stamp: stampOf(await fsp.stat(here.full)), remoteId: uploaded.id };
+          continue;
+        }
+      }
+
+      await this.archiveConflict(rel, remote);
+      const uploaded = await this.upload(rel, here, remote, remoteState.folders, rootId);
+      next[rel] = { hash: uploaded.hash, stamp: here.stamp, remoteId: uploaded.id };
+    }
+
+    for (const [rel, here] of local) {
+      if (remoteState.files.has(rel)) continue;
+      const uploaded = await this.upload(rel, here, null, remoteState.folders, rootId);
+      next[rel] = { hash: uploaded.hash, stamp: here.stamp, remoteId: uploaded.id };
+    }
+
+    const updatedSettings = this.readSettings();
+    updatedSettings.googleDriveSync = {
+      ...(updatedSettings.googleDriveSync || syncState),
+      rootId,
+      files: next,
+      folders: Object.fromEntries(remoteState.folders),
+      lastSynced: new Date().toISOString()
+    };
+    this.writeSettings(updatedSettings);
+    return updatedSettings.googleDriveSync.lastSynced;
+  }
+
   async syncChangedOnce() {
     const changed = [...this.pendingPaths];
     this.pendingPaths.clear();
@@ -682,7 +788,7 @@ class GoogleDriveSync {
       await this.uploadMedia(`${DRIVE_UPLOAD}/files?uploadType=resumable&fields=id,name,modifiedTime`, { name, parents: [backupFolder.id] }, data, 'application/zip');
     }
     const backups = (await this.listChildren(backupFolder.id))
-      .filter((item) => /^neo-backup-\d{4}-\d{2}-\d{2}\.zip$/.test(item.name))
+      .filter((item) => /^neo-backup-\d{4}-\d{2}-\d{2}(?:-\d{9})?\.zip$/.test(item.name))
       .sort((a, b) => b.name.localeCompare(a.name));
     for (const old of backups.slice(3)) await this.trashRemote(old);
   }

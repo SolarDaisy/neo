@@ -207,8 +207,61 @@ async function chooseLibraryFolder() {
 async function uploadRecentDriveBackups() {
   const dir = path.join(LIBRARY_DIR, 'Backups');
   let names = [];
-  try { names = fs.readdirSync(dir).filter((name) => /^neo-backup-\d{4}-\d{2}-\d{2}\.zip$/.test(name)).sort().reverse().slice(0, 3); } catch { return; }
+  try { names = fs.readdirSync(dir).filter((name) => /^neo-backup-\d{4}-\d{2}-\d{2}(?:-\d{9})?\.zip$/.test(name)).sort().reverse().slice(0, 3); } catch { return; }
   for (const name of names) await googleDriveSync.uploadBackup(path.join(dir, name));
+}
+
+function backupToDriveNow() {
+  if (backupRunning) return Promise.reject(new Error('A library backup is already running.'));
+  const backupsDir = path.join(LIBRARY_DIR, 'Backups');
+  const now = new Date().toISOString();
+  const timestamp = now.slice(11, 23).replace(/[:.]/g, '');
+  const target = path.join(backupsDir, `neo-backup-${now.slice(0, 10)}-${timestamp}.zip`);
+  try { fs.mkdirSync(backupsDir, { recursive: true }); } catch (err) { return Promise.reject(err); }
+  backupRunning = true;
+  return new Promise((resolve, reject) => {
+    let child = null;
+    let timer = null;
+    let finished = false;
+    const finish = (err, keepArchive = false) => {
+      if (finished) return;
+      finished = true;
+      backupRunning = false;
+      clearTimeout(timer);
+      if (err) {
+        logError('Google Drive backup', err);
+        try { fs.unlinkSync(target + '.tmp'); } catch { /* none */ }
+        if (!keepArchive) {
+          try { fs.unlinkSync(target); } catch { /* none */ }
+        }
+        reject(err);
+      } else {
+        resolve(target);
+      }
+      try { if (child) child.kill(); } catch { /* gone */ }
+    };
+    try {
+      child = utilityProcess.fork(path.join(__dirname, 'backup-worker.js'), [], { serviceName: 'NEO backup' });
+    } catch (err) { finish(err); return; }
+    timer = setTimeout(() => finish(new Error('the backup took longer than ' + BACKUP_LIMIT_MS / 60000 + ' minutes and was stopped')), BACKUP_LIMIT_MS);
+    child.on('message', async (msg) => {
+      if (finished) return;
+      if (!msg || !msg.ok) { finish(new Error((msg && msg.error) || 'the backup failed')); return; }
+      clearTimeout(timer);
+      timer = null;
+      if (msg.missed && msg.missed.length) logError('backup', new Error('left out of manual backup: ' + msg.missed.join(', ')));
+      try {
+        await googleDriveSync.uploadBackup(target);
+        finish(null);
+      } catch (err) {
+        finish(new Error('Google Drive upload failed; the local backup remains at ' + target + ': ' + ((err && err.message) || err)), true);
+      }
+    });
+    child.on('exit', (code) => {
+      if (code && !finished) finish(new Error('the backup stopped (' + code + ')'));
+    });
+    try { child.postMessage({ libraryDir: LIBRARY_DIR, target, keep: 14, fileLimitMs: BACKUP_FILE_LIMIT_MS }); } catch (err) { finish(err); }
+  });
 }
 
 async function manageGoogleDrive() {
@@ -233,34 +286,101 @@ async function manageGoogleDrive() {
     }
   }
   const buttons = connected
-    ? [t('Sync Now'), t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Disconnect'), t('Cancel')]
+    ? [t('Sync Now'), t('More…'), t('Cancel')]
     : [t('Connect Google Drive…'), t('Cancel')];
   const { response } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
     type: 'question',
     message: t('Google Drive'),
     detail: connected
       ? t(deletePropagation
-        ? 'Your latest library is synced in the background after saves. NEO also keeps the three newest daily backups in Google Drive. Deletion sync is on.'
-        : 'Your latest library is synced in the background after saves. NEO also keeps the three newest daily backups in Google Drive. Deletion sync is off.')
-      : t('Connect Google Drive to sync your library after saves and keep the three newest daily backups there.'),
+        ? 'Your latest library is synced in the background after saves. NEO also keeps the three newest backups in Google Drive. Deletion sync is on.'
+        : 'Your latest library is synced in the background after saves. NEO also keeps the three newest backups in Google Drive. Deletion sync is off.')
+      : t('Connect Google Drive to sync your library after saves and keep the three newest backups there.'),
     buttons,
     defaultId: 0,
-    cancelId: connected ? 3 : 1
+    cancelId: connected ? 5 : 1
   });
-  if (response === (connected ? 3 : 1)) return;
+  if (response < 0 || response === (connected ? 2 : 1)) return;
+  let action = response;
   if (connected && response === 1) {
+    const { response: moreChoice } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'question',
+      message: t('Google Drive'),
+      detail: t('Choose another Drive action.'),
+      buttons: [t('Backup…'), t('Import from Drive…'), t('Connection Settings…')],
+      defaultId: 0,
+      cancelId: 2
+    });
+    if (moreChoice < 0) return;
+    if (moreChoice === 0) action = 3;
+    else if (moreChoice === 1) action = 4;
+    else {
+      const { response: settingsChoice } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+        type: 'question',
+        message: t('Google Drive'),
+        detail: t(deletePropagation ? 'Deletion sync is on.' : 'Deletion sync is off.'),
+        buttons: [t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Disconnect'), t('Back')],
+        defaultId: 2,
+        cancelId: 2
+      });
+      if (settingsChoice < 0) return;
+      if (settingsChoice === 0) {
+        try {
+          const enabled = await googleDriveSync.setDeletePropagation(!deletePropagation);
+          sendToWindow({ type: 'googleDriveSync', ok: true, deletePropagation: enabled });
+        } catch (err) {
+          logError('Google Drive deletion sync', err);
+          sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+        }
+      } else if (settingsChoice === 1) {
+        await googleDriveSync.disconnect();
+        sendToWindow({ type: 'googleDriveSync', ok: true, disconnected: true });
+      }
+      return;
+    }
+  }
+  if (connected && action === 3) {
+    const { response: backupChoice } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'question',
+      message: t('Google Drive backup'),
+      detail: t('Create a fresh backup now, or upload today’s existing automatic backup?'),
+      buttons: [t('Create fresh backup'), t('Upload today’s backup'), t('Cancel')],
+      defaultId: 0,
+      cancelId: 2
+    });
+    if (backupChoice < 0 || backupChoice === 2) return;
     try {
-      const enabled = await googleDriveSync.setDeletePropagation(!deletePropagation);
-      sendToWindow({ type: 'googleDriveSync', ok: true, deletePropagation: enabled });
+      if (backupChoice === 0) await backupToDriveNow();
+      else {
+        const file = path.join(LIBRARY_DIR, 'Backups', `neo-backup-${new Date().toISOString().slice(0, 10)}.zip`);
+        if (!fs.existsSync(file)) throw new Error('There is no automatic backup for today yet. Choose Create fresh backup instead.');
+        await googleDriveSync.uploadBackup(file);
+      }
+      sendToWindow({ type: 'googleDriveSync', ok: true, backup: true });
     } catch (err) {
-      logError('Google Drive deletion sync', err);
+      logError('Google Drive backup', err);
       sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
     }
     return;
   }
-  if (connected && response === 2) {
-    await googleDriveSync.disconnect();
-    sendToWindow({ type: 'googleDriveSync', ok: true, disconnected: true });
+  if (connected && action === 4) {
+    const { response: confirmImport } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'question',
+      message: t('Import from Google Drive'),
+      detail: t('Add books and files that are in Drive but not on this computer. Existing local files stay in place; conflicting Drive versions are saved as conflict copies.'),
+      buttons: [t('Import'), t('Cancel')],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (confirmImport !== 0) return;
+    try {
+      await googleDriveSync.importFromDrive();
+      googleDriveSync.startMonitoring();
+      sendToWindow({ type: 'googleDriveSync', ok: true, imported: true });
+    } catch (err) {
+      logError('Google Drive import', err);
+      sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+    }
     return;
   }
   try {
