@@ -200,6 +200,117 @@ test('deletion sync preference is stored on the shared Drive root', async () => 
   }
 });
 
+test('Google Drive uses one top-level Neo Library folder by default', async () => {
+  let settings = {};
+  const queries = [];
+  let creates = 0;
+  const service = new GoogleDriveSync({
+    readSettings: () => settings,
+    writeSettings: (next) => { settings = next; },
+    logError: () => {}
+  });
+  service.request = async (url, options = {}) => {
+    if (!options.method) {
+      queries.push(new URL(url).searchParams.get('q'));
+      return { files: [] };
+    }
+    creates++;
+    const body = JSON.parse(options.body);
+    assert.equal(body.name, 'Neo Library');
+    assert.deepEqual(body.parents, ['root']);
+    return { id: 'neo-library', name: body.name };
+  };
+
+  const roots = await Promise.all([service.ensureRoot(), service.ensureRoot()]);
+
+  assert.deepEqual(roots, ['neo-library', 'neo-library']);
+  assert.equal(creates, 1);
+  assert.equal(settings.googleDriveSync.folderName, 'Neo Library');
+  assert.ok(queries.every((query) => query.includes("'root' in parents")));
+});
+
+test('existing NEO Library folders are renamed instead of creating a second default folder', async () => {
+  let settings = { googleDriveSync: { rootId: 'legacy-root' } };
+  let renamed = false;
+  const service = new GoogleDriveSync({
+    readSettings: () => settings,
+    writeSettings: (next) => { settings = next; },
+    logError: () => {}
+  });
+  service.request = async (_url, options = {}) => {
+    if (!options.method) return { id: 'legacy-root', name: 'NEO Library' };
+    renamed = JSON.parse(options.body).name === 'Neo Library';
+    return { id: 'legacy-root', name: 'Neo Library' };
+  };
+
+  assert.equal(await service.ensureRoot(), 'legacy-root');
+  assert.equal(renamed, true);
+  assert.equal(settings.googleDriveSync.folderName, 'Neo Library');
+});
+
+test('a custom Google Drive folder resets sync state but leaves the old root untouched', async () => {
+  let settings = { googleDriveSync: { rootId: 'old-root', files: { 'library.json': { hash: 'old' } }, folders: { book: 'old-book' } } };
+  const service = new GoogleDriveSync({
+    readSettings: () => settings,
+    writeSettings: (next) => { settings = next; },
+    logError: () => {}
+  });
+  service.rootId = 'old-root';
+
+  assert.equal(await service.setFolderName(' My Writing '), true);
+
+  assert.deepEqual(settings.googleDriveSync, { rootId: null, files: {}, folders: {}, folderName: 'My Writing' });
+  assert.equal(service.rootId, null);
+  assert.equal(await service.setFolderName('My Writing'), false);
+  await assert.rejects(service.setFolderName('../outside'), /folder name/);
+});
+
+test('import adds Drive-only files, merges shelves, and preserves local conflicts', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neo-drive-'));
+  try {
+    const localLibrary = {
+      authorName: 'Local Writer',
+      shelves: [{ id: 'shelf-local', name: 'Local', bookIds: ['book-local'] }]
+    };
+    const remoteLibrary = {
+      authorName: 'Drive Writer',
+      shelves: [{ id: 'shelf-drive', name: 'From Drive', bookIds: ['book-drive'] }]
+    };
+    const localFile = path.join(dir, 'book-local', 'chapters', 'one.html');
+    const localOnlyFile = path.join(dir, 'book-local', 'chapters', 'kept.html');
+    await fs.mkdir(path.dirname(localFile), { recursive: true });
+    await fs.writeFile(path.join(dir, 'library.json'), JSON.stringify(localLibrary));
+    await fs.writeFile(localFile, 'local version');
+    await fs.writeFile(localOnlyFile, 'keep this book file');
+    const remoteLibraryData = Buffer.from(JSON.stringify(remoteLibrary));
+    const remoteChapterData = Buffer.from('Drive conflict');
+    const remoteBookData = Buffer.from('Drive-only book');
+    const remote = new Map([
+      ['library.json', { id: 'remote-library', hash: hash(remoteLibraryData), data: remoteLibraryData }],
+      ['book-local/chapters/one.html', { id: 'remote-chapter', hash: hash(remoteChapterData), data: remoteChapterData }],
+      ['book-drive/book.json', { id: 'remote-book', hash: hash(remoteBookData), data: remoteBookData }]
+    ]);
+    const settings = { googleDriveSync: { rootId: 'root', files: {
+      'book-local/chapters/kept.html': { hash: hash(Buffer.from('keep this book file')), stamp: 'old', remoteId: 'missing-drive-file' }
+    } } };
+    const { service } = serviceFor(dir, settings, remote, true);
+    service.bytes = async (item) => Buffer.from(item.data);
+
+    await service.importFromDrive();
+
+    const merged = JSON.parse(await fs.readFile(path.join(dir, 'library.json'), 'utf8'));
+    assert.deepEqual(merged.shelves.map((shelf) => shelf.bookIds), [['book-local'], ['book-drive']]);
+    assert.equal(merged.authorName, 'Local Writer');
+    assert.equal(await fs.readFile(path.join(dir, 'book-drive', 'book.json'), 'utf8'), 'Drive-only book');
+    assert.equal(await fs.readFile(localFile, 'utf8'), 'local version');
+    assert.equal(await fs.readFile(localOnlyFile, 'utf8'), 'keep this book file');
+    assert.equal(remote.has('book-local/chapters/kept.html'), true);
+    assert.deepEqual(service.conflicts, [{ rel: 'book-local/chapters/one.html', data: 'Drive conflict' }]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('library scan excludes backup archives, temporary writes, and iCloud stand-ins', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'neo-drive-'));
   const service = new GoogleDriveSync({ libraryDir: dir });

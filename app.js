@@ -17923,6 +17923,18 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'googleDriveSync') {
     if (msg.disconnected) toast(t('Google Drive disconnected'));
     else if (msg.deletePropagation !== undefined) toast(t(msg.deletePropagation ? 'Google Drive deletion sync is on' : 'Google Drive deletion sync is off'));
+    else if (msg.folderChanged) toast(t('Google Drive folder changed to {name}', { name: msg.folderChanged }));
+    else if (msg.backup) toast(t('Google Drive backup finished'));
+    else if (msg.imported) {
+      try {
+        const fresh = await window.neo.readLibrary();
+        if (fresh) library = applyDeviceLook(fresh);
+        await renderShelves();
+      } catch (err) {
+        reportError('Google Drive import refresh: ' + ((err && err.message) || err));
+      }
+      toast(t('Google Drive import finished'));
+    }
     else if (msg.ok) toast(t('Google Drive sync finished'));
     else toast(t('Google Drive sync failed: {error}', { error: msg.error || t('unknown error') }), 8000);
     return;
