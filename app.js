@@ -8684,6 +8684,7 @@ function switchTab(name) {
   }
   if (book && !notesPageOk(notesPage)) notesPage = 'book';
   currentTab = name;
+  updateBodyFontControl();
   sidePaneForTab(name);
   queueSideCards();
   applyBright();
@@ -15213,6 +15214,7 @@ function applyFonts() {
   if (f.body && typeof f.body === 'string') {
     document.documentElement.style.setProperty('--body-font', bodyFontStack(f.body));
   }
+  updateBodyFontControl();
   if (f.dropcap && DROPCAP_FONTS[f.dropcap]) {
     document.documentElement.style.setProperty('--dropcap-font', DROPCAP_FONTS[f.dropcap]);
   }
@@ -15239,6 +15241,35 @@ function applyFonts() {
 function bodyFontStack(name) {
   return Object.hasOwn(BODY_FONTS, name) ? BODY_FONTS[name] : `"${name.replace(/["\\]/g, '')}", Georgia, serif`;
 }
+
+function updateBodyFontControl() {
+  const control = $('#body-font-control');
+  if (!control) return;
+  const current = (library.fonts || {}).body || 'Georgia';
+  const choices = [...BODY_FONT_CHOICES];
+  if (!choices.includes(current)) choices.unshift(current);
+  const signature = JSON.stringify(choices);
+  if (control.dataset.choices !== signature) {
+    control.replaceChildren(...choices.map((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      option.style.fontFamily = bodyFontStack(name);
+      return option;
+    }));
+    control.dataset.choices = signature;
+  }
+  control.value = current;
+  control.hidden = IS_POCKET || !book || isScript() || currentTab !== 'manuscript';
+}
+
+$('#body-font-control').addEventListener('change', (event) => {
+  const name = event.currentTarget.value;
+  if (!BODY_FONT_CHOICES.includes(name)) return;
+  library.fonts = library.fonts || {};
+  library.fonts.body = name;
+  writeLibrary(library).then(applyFonts).catch((err) => reportError('Body font: ' + ((err && err.message) || err)));
+});
 
 // Format → Body Font → Other Font…: every font installed on this computer,
 // each shown in its own face. The panel sits top right, off the undimmed
