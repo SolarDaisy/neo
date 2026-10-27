@@ -13,6 +13,9 @@ This fork adds cloud backup and syncing capabilities with Google Drive, as well 
 ## Cloud support
 To enable Google Drive support, you will need an OAuth client ID. you can go **[HERE](https://support.google.com/cloud/answer/15544987?hl=en&ref_topic=15540269&sjid=11036149471100218666-NC)** to find out how.
 
+## Custom fonts
+Using custom fonts is as simple as opening a manuscript and selecting `Format > Fonts`
+
 ## Download
 
 Get the latest installer from the **[Releases page](../../releases)**:
