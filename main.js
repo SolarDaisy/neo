@@ -2,11 +2,14 @@
 // Owns the window and all file-system access. The renderer talks to this
 // through the IPC handlers below (see preload.js for the exposed API).
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, utilityProcess, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, utilityProcess, screen, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Buffer } = require('buffer');
+const { GoogleDriveSync } = require('./google-drive.js');
+
+let googleDriveSync = null;
 
 // Every disk request from the page passes through here: a write the system
 // refuses (see reportBlockedWrite) is explained to the writer, then the error
@@ -58,6 +61,10 @@ function writeSettings(obj) {
   // the same whole-or-nothing write as the library: a settings file cut
   // short would forget a chosen library folder
   writeFileDurable(settingsPath(), JSON.stringify(obj, null, 2));
+}
+
+function scheduleDriveSync(file) {
+  if (googleDriveSync) googleDriveSync.schedule(file);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +202,77 @@ async function chooseLibraryFolder() {
   writeSettings(settings);
   app.relaunch();
   app.exit(0);
+}
+
+async function uploadRecentDriveBackups() {
+  const dir = path.join(LIBRARY_DIR, 'Backups');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((name) => /^neo-backup-\d{4}-\d{2}-\d{2}\.zip$/.test(name)).sort().reverse().slice(0, 3); } catch { return; }
+  for (const name of names) await googleDriveSync.uploadBackup(path.join(dir, name));
+}
+
+async function manageGoogleDrive() {
+  if (!googleDriveSync) throw new Error('Google Drive is not ready yet.');
+  if (!googleDriveSync.configured()) {
+    await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+      type: 'info',
+      message: t('Google Drive is not configured in this build'),
+      detail: t('The publisher must add a Google OAuth client ID before Google Drive can be connected.')
+    });
+    return;
+  }
+  const connected = googleDriveSync.connected();
+  let deletePropagation = false;
+  if (connected) {
+    try {
+      deletePropagation = await googleDriveSync.deletePropagation(await googleDriveSync.ensureRoot());
+    } catch (err) {
+      logError('Google Drive deletion sync', err);
+      sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+      return;
+    }
+  }
+  const buttons = connected
+    ? [t('Sync Now'), t(deletePropagation ? 'Turn off deletion sync' : 'Turn on deletion sync'), t('Disconnect'), t('Cancel')]
+    : [t('Connect Google Drive…'), t('Cancel')];
+  const { response } = await dialog.showMessageBox(BrowserWindow.getFocusedWindow(), {
+    type: 'question',
+    message: t('Google Drive'),
+    detail: connected
+      ? t(deletePropagation
+        ? 'Your latest library is synced in the background after saves. NEO also keeps the three newest daily backups in Google Drive. Deletion sync is on.'
+        : 'Your latest library is synced in the background after saves. NEO also keeps the three newest daily backups in Google Drive. Deletion sync is off.')
+      : t('Connect Google Drive to sync your library after saves and keep the three newest daily backups there.'),
+    buttons,
+    defaultId: 0,
+    cancelId: connected ? 3 : 1
+  });
+  if (response === (connected ? 3 : 1)) return;
+  if (connected && response === 1) {
+    try {
+      const enabled = await googleDriveSync.setDeletePropagation(!deletePropagation);
+      sendToWindow({ type: 'googleDriveSync', ok: true, deletePropagation: enabled });
+    } catch (err) {
+      logError('Google Drive deletion sync', err);
+      sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+    }
+    return;
+  }
+  if (connected && response === 2) {
+    await googleDriveSync.disconnect();
+    sendToWindow({ type: 'googleDriveSync', ok: true, disconnected: true });
+    return;
+  }
+  try {
+    if (!connected) await googleDriveSync.authorize();
+    await googleDriveSync.sync();
+    googleDriveSync.startMonitoring();
+    await uploadRecentDriveBackups();
+    sendToWindow({ type: 'googleDriveSync', ok: true });
+  } catch (err) {
+    logError('Google Drive sync', err);
+    sendToWindow({ type: 'googleDriveSync', ok: false, error: (err && err.message) || String(err) });
+  }
 }
 
 // Can NEO write in this folder? Windows' Controlled folder access (Defender's
@@ -470,6 +548,8 @@ function writeFileDurable(file, data) {
   if (process.platform !== 'win32') {
     try { const d = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* fine */ }
   }
+  const rel = path.relative(LIBRARY_DIR, file);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) scheduleDriveSync(file);
 }
 
 // JSON reads fall back on the copies a write leaves: the .tmp a write was
@@ -859,6 +939,7 @@ function chapterDiverged(cur, expected, html) {
 ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
   if (fs.existsSync(file)) fs.unlinkSync(file);
+  scheduleDriveSync();
   return true;
 });
 
@@ -915,6 +996,7 @@ ipcMain.handle('snapshot:write', (_e, bookId, name, file, text) => {
 });
 ipcMain.handle('snapshot:remove', (_e, bookId, name) => {
   try { fs.rmSync(snapshotDir(bookId, name), { recursive: true, force: true }); } catch (err) { logError('snapshot remove', err); }
+  scheduleDriveSync();
   return true;
 });
 
@@ -950,6 +1032,7 @@ ipcMain.handle('book:delete', async (_e, bookId, title) => {
     const { shell } = require('electron');
     try {
       await shell.trashItem(bookDir(bookId));
+      scheduleDriveSync();
       return true;
     } catch (err) {
       // Some filesystems have no Trash (network mounts, odd drives).
@@ -1003,12 +1086,14 @@ ipcMain.handle('cover:set', (_e, bookId, srcPath) => {
   for (const f of fs.readdirSync(dir)) {
     if (/^cover-\d+\./.test(f) && f !== fname) fs.unlinkSync(path.join(dir, f));
   }
+  scheduleDriveSync();
   return fname;
 });
 
 ipcMain.handle('cover:remove', (_e, bookId) => {
   const dir = bookDir(bookId);
   if (fs.existsSync(dir)) clearCovers(dir);
+  scheduleDriveSync();
   return true;
 });
 
@@ -2119,6 +2204,9 @@ function dailyBackup() {
         logError('backup', err);
         try { fs.unlinkSync(target + '.tmp'); } catch { /* none */ }
       }
+      if (!err && googleDriveSync && googleDriveSync.connected()) {
+        googleDriveSync.uploadBackup(target).catch((backupErr) => logError('Google Drive backup', backupErr));
+      }
       try { if (child) child.kill(); } catch { /* gone */ }
       resolve();
     };
@@ -2661,6 +2749,7 @@ function buildMenu() {
           click: () => sendToWindow({ type: 'importChapters' })
         },
         { more: true, label: t('Reshelve a Book…'), click: () => sendToWindow({ type: 'reshelve' }) },
+        { label: t('Google Drive…'), click: () => { manageGoogleDrive().catch((err) => logError('Google Drive', err)); } },
         { label: t('Library Folder…'), click: () => { chooseLibraryFolder().catch((err) => logError('library folder', err)); } },
         { type: 'separator' },
         {
@@ -3344,6 +3433,16 @@ app.whenReady().then(() => {
     try { initLanguage(); } catch (err) { logError('language', err); }
     try { checkLibraryWritable(); } catch (err) { logError('library check', err); }
     try { ensureLibrary(); } catch (err) { logError('library', err); }
+    try {
+      googleDriveSync = new GoogleDriveSync({
+        shell, safeStorage, libraryDir: LIBRARY_DIR, readSettings, writeSettings, logError,
+        trashFile: (file) => shell.trashItem(file), isCloudOnly
+      });
+      googleDriveSync.startMonitoring();
+      if (googleDriveSync.connected()) {
+        uploadRecentDriveBackups().catch((err) => logError('Google Drive backup', err));
+      }
+    } catch (err) { logError('Google Drive', err); }
     createWindow();
     try { announceLibraryFallback(); } catch (err) { logError('library notice', err); }
     try { initSpell(); } catch (err) { logError('spell', err); }
