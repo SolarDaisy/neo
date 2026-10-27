@@ -1,10 +1,17 @@
 # NEO
+## This is a fork
+**[Click here](https://github.com/hughhowey/neo)** to go to the original
 
 **A distraction-free word processor for authors, by a wannabe author.**
 
 NEO understands from the moment you install it that you are writing *books* and nothing else. No bloat, no distractions, with manuscripts that look like books as you write them.
 
 NEO runs locally. WIPs are saved in plain files on your disk. No accounts or subscriptions. And it's free!
+
+This fork adds cloud backup and syncing capabilities with Google Drive, as well as allowing the use of custom fonts within a manuscript.
+
+## Cloud support
+To enable Google Drive support, you will need an OAuth client ID. you can go **[HERE](https://support.google.com/cloud/answer/15544987?hl=en&ref_topic=15540269&sjid=11036149471100218666-NC)** to find out how.
 
 ## Download
 
